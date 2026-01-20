@@ -1,7 +1,15 @@
 db:
-  user : root
+  user : postgres
   password : ${DB_PASSWORD}
-  name : berliner
-  address : localhost:3306
+  name : postgres
+  address : database-1.cf22o08mq67p.eu-north-1.rds.amazonaws.com:5432
   protocol : tcp
-  migrationsUrl : file://./migrations 
+  migrationsUrl : file://./migrations
+  sslmode : require
+
+aws:
+  enabled : false
+  region : eu-north-1
+  secrets:
+    db_password : rds!db-0dfd5023-99f4-4ac5-b050-e6c01bb428cf
+    jwt_secret : berliner/jwt_secret

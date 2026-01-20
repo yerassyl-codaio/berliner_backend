@@ -2,7 +2,6 @@ package repository
 
 import (
 	"github.com/I1Asyl/berliner_backend/models"
-	"github.com/golang-migrate/migrate/v4"
 )
 
 type SqlQueries interface {
@@ -49,11 +48,10 @@ type SqlQueries interface {
 
 type Repository struct {
 	SqlQueries
-	Migration *migrate.Migrate
 }
 
 //go:generate mockgen -source=repository.go -destination=mocks/repository.go
 
-func NewRepository(dsn string, migrationsPath string) *Repository {
-	return &Repository{SqlQueries: NewDatabase(dsn), Migration: NewMigration(dsn, migrationsPath)}
+func NewRepository(dsn string) *Repository {
+	return &Repository{SqlQueries: NewDatabase(dsn)}
 }

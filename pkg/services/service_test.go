@@ -11,7 +11,7 @@ import (
 
 	"github.com/I1Asyl/berliner_backend/models"
 	"github.com/I1Asyl/berliner_backend/pkg/repository"
-	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/lib/pq"
 	"github.com/ory/dockertest/v3"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -20,6 +20,96 @@ var db *sql.DB
 var services *Services
 var repo *repository.Repository
 var testUser models.User
+
+// setupSchema creates all database tables needed for testing
+func setupSchema(db *sql.DB) error {
+	schema := `
+		CREATE TYPE author_type AS ENUM ('user', 'channel');
+
+		CREATE TABLE IF NOT EXISTS "user" (
+			id SERIAL PRIMARY KEY,
+			username VARCHAR(255) UNIQUE NOT NULL,
+			email VARCHAR(255) NOT NULL,
+			first_name VARCHAR(255) NOT NULL,
+			last_name VARCHAR(255) NOT NULL,
+			password VARCHAR(255) NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS channel (
+			id SERIAL PRIMARY KEY,
+			name VARCHAR(255) UNIQUE NOT NULL,
+			leader_id INT DEFAULT NULL,
+			description TEXT NOT NULL,
+			FOREIGN KEY (leader_id) REFERENCES "user"(id) ON DELETE SET NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS membership (
+			id SERIAL PRIMARY KEY,
+			channel_id INT NOT NULL,
+			user_id INT NOT NULL,
+			is_editor BOOLEAN NOT NULL,
+			FOREIGN KEY (channel_id) REFERENCES channel(id) ON DELETE CASCADE,
+			FOREIGN KEY (user_id) REFERENCES "user"(id) ON DELETE CASCADE
+		);
+
+		CREATE TABLE IF NOT EXISTS request (
+			id SERIAL PRIMARY KEY,
+			channel_id INT NOT NULL,
+			user_id INT NOT NULL,
+			is_accepted BOOLEAN NOT NULL,
+			FOREIGN KEY (channel_id) REFERENCES channel(id) ON DELETE CASCADE,
+			FOREIGN KEY (user_id) REFERENCES "user"(id) ON DELETE CASCADE
+		);
+
+		CREATE TABLE IF NOT EXISTS following (
+			id SERIAL PRIMARY KEY,
+			user_id INT NOT NULL,
+			follower_id INT NOT NULL,
+			FOREIGN KEY (user_id) REFERENCES "user"(id) ON DELETE CASCADE,
+			FOREIGN KEY (follower_id) REFERENCES "user"(id) ON DELETE CASCADE
+		);
+
+		CREATE TABLE IF NOT EXISTS user_post (
+			id SERIAL PRIMARY KEY,
+			content TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			author_type author_type NOT NULL,
+			is_public BOOLEAN NOT NULL,
+			user_id INT NOT NULL,
+			FOREIGN KEY (user_id) REFERENCES "user"(id) ON DELETE CASCADE
+		);
+
+		CREATE TABLE IF NOT EXISTS channel_post (
+			id SERIAL PRIMARY KEY,
+			content TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			author_type author_type NOT NULL,
+			is_public BOOLEAN NOT NULL,
+			channel_id INT NOT NULL,
+			FOREIGN KEY (channel_id) REFERENCES channel(id) ON DELETE CASCADE
+		);
+	`
+	_, err := db.Exec(schema)
+	return err
+}
+
+// teardownSchema drops all database tables after testing
+func teardownSchema(db *sql.DB) error {
+	schema := `
+		DROP TABLE IF EXISTS membership CASCADE;
+		DROP TABLE IF EXISTS request CASCADE;
+		DROP TABLE IF EXISTS user_post CASCADE;
+		DROP TABLE IF EXISTS channel_post CASCADE;
+		DROP TABLE IF EXISTS channel CASCADE;
+		DROP TABLE IF EXISTS following CASCADE;
+		DROP TABLE IF EXISTS "user" CASCADE;
+		DROP TYPE IF EXISTS author_type CASCADE;
+	`
+	_, err := db.Exec(schema)
+	return err
+}
 
 func TestMain(m *testing.M) {
 	// uses a sensible default on windows (tcp/http) and linux/osx (socket)
@@ -35,7 +125,11 @@ func TestMain(m *testing.M) {
 	}
 
 	// pulls an image, creates a container based on it and runs it
-	resource, err := pool.Run("mysql", "", []string{"MYSQL_ROOT_PASSWORD=secret", "MYSQL_DATABASE=berliner"})
+	resource, err := pool.Run("postgres", "16-alpine", []string{
+		"POSTGRES_PASSWORD=secret",
+		"POSTGRES_USER=postgres",
+		"POSTGRES_DB=berliner",
+	})
 	if err != nil {
 		log.Fatalf("Could not start resource: %s", err)
 	}
@@ -49,10 +143,10 @@ func TestMain(m *testing.M) {
 		Password:  "Qqwerty1!.",
 	}
 	// exponential backoff-retry, because the application in the container might not be ready to accept connections yet
-	dsn := fmt.Sprintf("root:secret@tcp(localhost:%s)/berliner", resource.GetPort("3306/tcp"))
+	dsn := fmt.Sprintf("host=localhost port=%s user=postgres password=secret dbname=berliner sslmode=disable", resource.GetPort("5432/tcp"))
 	if err := pool.Retry(func() error {
 		var err error
-		db, err = sql.Open("mysql", dsn)
+		db, err = sql.Open("postgres", dsn)
 		if err != nil {
 			return err
 		}
@@ -60,10 +154,20 @@ func TestMain(m *testing.M) {
 	}); err != nil {
 		log.Fatalf("Could not connect to database: %s", err)
 	}
-	repo = repository.NewRepository(dsn, "file://../../migrations")
+	repo = repository.NewRepository(dsn)
 	services = NewService(repo)
 
+	// Setup database schema
+	if err := setupSchema(db); err != nil {
+		log.Fatalf("Could not setup database schema: %s", err)
+	}
+
 	code := m.Run()
+
+	// Teardown database schema
+	if err := teardownSchema(db); err != nil {
+		log.Printf("Could not teardown database schema: %s", err)
+	}
 
 	// You can't defer this because os.Exit doesn't care for defer
 	if err := pool.Purge(resource); err != nil {
@@ -117,10 +221,6 @@ func TestAddUser(t *testing.T) {
 			},
 		},
 	}
-	err := repo.Migration.Up()
-	if err != nil {
-		t.Errorf("Migration problems %s ", err)
-	}
 	for _, testCase := range testTable {
 		t.Run(testCase.name, func(t *testing.T) {
 			err := services.AddUser(testCase.inputUser)
@@ -129,10 +229,6 @@ func TestAddUser(t *testing.T) {
 				t.Errorf("Expected %v, got %v", testCase.expected, err)
 			}
 		})
-	}
-	err = repo.Migration.Down()
-	if err != nil {
-		t.Errorf("Migration problems %s ", err)
 	}
 }
 
@@ -160,10 +256,6 @@ func TestCheckUserAndPassword(t *testing.T) {
 		},
 	}
 
-	err := repo.Migration.Up()
-	if err != nil {
-		t.Errorf("Migration problems %s ", err)
-	}
 	services.AddUser(testUser)
 	for _, testCase := range testTable {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -172,10 +264,6 @@ func TestCheckUserAndPassword(t *testing.T) {
 				t.Errorf("Expected %v, got %v", testCase.expected, ans)
 			}
 		})
-	}
-	err = repo.Migration.Down()
-	if err != nil {
-		t.Errorf("Migration problems %s ", err)
 	}
 }
 
@@ -211,10 +299,6 @@ func TestGenarateToken(t *testing.T) {
 			jwt_secret: "randomJWTSecret",
 		},
 	}
-	err := repo.Migration.Up()
-	if err != nil {
-		t.Errorf("Migration problems %s ", err)
-	}
 	for _, testCase := range testTable {
 		t.Run(testCase.name, func(t *testing.T) {
 			os.Setenv("JWT_SECRET", testCase.jwt_secret)
@@ -223,10 +307,6 @@ func TestGenarateToken(t *testing.T) {
 				t.Errorf("Expected %v, got %v, error: %s", testCase.expected, ans, err)
 			}
 		})
-	}
-	err = repo.Migration.Down()
-	if err != nil {
-		t.Errorf("Migration problems %s ", err)
 	}
 }
 
@@ -244,10 +324,6 @@ func TestParseToken(t *testing.T) {
 			expectedUsername: "asyl",
 		},
 	}
-	err := repo.Migration.Up()
-	if err != nil {
-		t.Errorf("Migration problems %s ", err)
-	}
 	for _, testCase := range testTable {
 		t.Run(testCase.name, func(t *testing.T) {
 			os.Setenv("JWT_SECRET", testCase.jwt_secret)
@@ -256,10 +332,6 @@ func TestParseToken(t *testing.T) {
 				t.Errorf("Expected %v, got %v, error: %s", testCase.expectedUsername, ans, err)
 			}
 		})
-	}
-	err = repo.Migration.Down()
-	if err != nil {
-		t.Errorf("Migration problems %s ", err)
 	}
 }
 
@@ -317,21 +389,13 @@ func TestCreateChannel(t *testing.T) {
 	}
 
 	for _, testCase := range testTable {
-
 		t.Run(testCase.name, func(t *testing.T) {
-			if err := repo.Migration.Up(); err != nil {
-				t.Errorf("Migration problems %s ", err)
-			}
 			services.AddUser(testUser)
 			err := services.CreateChannel(testCase.channel, testUser)
 			if !reflect.DeepEqual(err, testCase.expected) {
 				t.Errorf("Expected %v, got %v", testCase.expected, err)
 			}
-			if err := repo.Migration.Down(); err != nil {
-				t.Errorf("Migration problems %s ", err)
-			}
 		})
-
 	}
 
 }
@@ -354,9 +418,6 @@ func TestGetUserByUsername(t *testing.T) {
 			expected: models.User{},
 		},
 	}
-	if err := repo.Migration.Up(); err != nil {
-		t.Errorf("Migration problems %s ", err)
-	}
 	services.AddUser(testUser)
 	for _, testCase := range testTable {
 		user, _ := services.GetUserByUsername(testCase.username)
@@ -367,9 +428,6 @@ func TestGetUserByUsername(t *testing.T) {
 		if !reflect.DeepEqual(user, testCase.expected) {
 			t.Errorf("Expected %v, got %v", testCase.expected, user)
 		}
-	}
-	if err := repo.Migration.Down(); err != nil {
-		t.Errorf("Migration problems %s ", err)
 	}
 }
 

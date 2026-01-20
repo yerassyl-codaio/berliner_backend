@@ -1,0 +1,30 @@
+# Git
+.git
+.gitignore
+
+# Binaries
+bin
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test files
+*_test.go
+
+# IDE
+.vscode
+.idea
+
+# Documentation
+*.md
+CLAUDE.md
+README.md
+
+# Logs
+*.log
+gin.log
+
+# OS
+.DS_Store
+Thumbs.db
