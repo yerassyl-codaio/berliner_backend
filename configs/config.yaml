@@ -8,7 +8,7 @@ db:
   sslmode : require
 
 aws:
-  enabled : false
+  enabled : true
   region : eu-north-1
   secrets:
     db_password : rds!db-0dfd5023-99f4-4ac5-b050-e6c01bb428cf

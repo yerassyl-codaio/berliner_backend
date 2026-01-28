@@ -2,8 +2,12 @@ package secrets
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 )
@@ -12,6 +16,11 @@ import (
 type Client struct {
 	svc    *secretsmanager.Client
 	region string
+}
+
+type SecretUserPass struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 // NewClient creates a new AWS Secrets Manager client
@@ -29,18 +38,44 @@ func NewClient(region string) (*Client, error) {
 
 // GetSecret retrieves a secret value by its name/ARN
 func (c *Client) GetSecret(ctx context.Context, secretName string) (string, error) {
-	input := &secretsmanager.GetSecretValueInput{
-		SecretId: &secretName,
-	}
+	var sup SecretUserPass
 
-	result, err := c.svc.GetSecretValue(ctx, input)
+	raw, err := c.getSecretRaw(ctx, secretName)
 	if err != nil {
 		return "", fmt.Errorf("failed to get secret %s: %w", secretName, err)
 	}
 
-	if result.SecretString == nil {
-		return "", fmt.Errorf("secret %s has no string value", secretName)
+	if err := json.Unmarshal([]byte(raw), &sup); err != nil {
+		// JSON parsed successfully. Use provided fields.
+		return "", fmt.Errorf("error unmarshaling: %w", err)
 	}
 
-	return *result.SecretString, nil
+	return sup.Password, nil
+}
+
+func (c *Client) getSecretRaw(ctx context.Context, secretName string) (string, error) {
+	in := &secretsmanager.GetSecretValueInput{
+		SecretId: aws.String(secretName),
+	}
+
+	out, err := c.svc.GetSecretValue(ctx, in)
+	if err != nil {
+		return "", fmt.Errorf("GetSecretValue error: %w", err)
+	}
+
+	// Prefer SecretString
+	if out.SecretString != nil {
+		return aws.ToString(out.SecretString), nil
+	}
+
+	// Fallback to SecretBinary (base64-encoded)
+	if out.SecretBinary != nil {
+		decoded, err := base64.StdEncoding.DecodeString(string(out.SecretBinary))
+		if err != nil {
+			return "", fmt.Errorf("failed to decode secret binary: %w", err)
+		}
+		return string(decoded), nil
+	}
+
+	return "", errors.New("secret contains no SecretString or SecretBinary")
 }
